@@ -3,6 +3,29 @@ import time
 from pathlib import Path
 import os
 import torch
+from torch import nn
+
+
+class SmoothCTCLoss(nn.Module):
+
+    def __init__(self, num_classes, blank=0, weight=0.01):
+        super().__init__()
+        self.weight = weight
+        self.num_classes = num_classes
+
+        self.ctc = nn.CTCLoss(reduction='mean', blank=blank, zero_infinity=True)
+        self.kldiv = nn.KLDivLoss(reduction='batchmean')
+
+    def forward(self, log_probs, targets, input_lengths, target_lengths):
+        ctc_loss = self.ctc(log_probs, targets, input_lengths, target_lengths)
+
+        kl_inp = log_probs.transpose(0, 1)
+        kl_tar = torch.full_like(kl_inp, 1. / self.num_classes)
+        kldiv_loss = self.kldiv(kl_inp, kl_tar)
+
+        #print(ctc_loss, kldiv_loss)
+        loss = (1. - self.weight) * ctc_loss + self.weight * kldiv_loss
+        return loss
 
 def get_optimizer(config, model):
 
@@ -98,18 +121,25 @@ class strLabelConverter(object):
 
         length = []
         result = []
+        text_fixed = []
         decode_flag = True if type(text[0])==bytes else False
 
         for item in text:
-
+            if  "b\'" in item or "b\"" in item:
+                    item = item[2:-1] 
+            item = item.replace("\'","").replace("\"","")
             if decode_flag:
                 item = item.decode('utf-8','strict')
             length.append(len(item))
+            text_fixed.append(item)
             for char in item:
-                index = self.dict[char]
+                try:
+                    index = self.dict[char.lower()]
+                except:
+                    raise Exception("Invaild Input!",item)
                 result.append(index)
         text = result
-        return (torch.IntTensor(text), torch.IntTensor(length))
+        return (torch.IntTensor(text), torch.IntTensor(length),text_fixed)
 
     def decode(self, t, length, raw=False):
         """Decode encoded texts back into strs.
@@ -161,3 +191,104 @@ def model_info(model):  # Plots a line-by-line description of a PyTorch model
         print('%5g %50s %9s %12g %20s %12.3g %12.3g' % (
             i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std()))
     print('Model Summary: %g layers, %g parameters, %g gradients\n' % (i + 1, n_p, n_g))
+
+
+
+import os
+import lmdb # install lmdb by "pip install lmdb"
+import cv2
+import numpy as np
+
+
+def checkImageIsValid(imageBin):
+    if imageBin is None:
+        return False
+    imageBuf = np.fromstring(imageBin, dtype=np.uint8)
+    if imageBuf.size == 0:
+        return False
+    # try:
+    img = cv2.imdecode(imageBuf, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return False
+    # except:
+    #     raise Exception("Invalid imageBuf!", imageBuf)
+
+    imgH, imgW = img.shape[0], img.shape[1]
+    # except:
+    #     raise Exception("Invalid img!", img,imageBuf)
+    
+    if imgH * imgW == 0:
+        return False
+    return True
+
+
+def writeCache(env, cache):
+    with env.begin(write=True) as txn:
+        for k, v in cache.items():
+            try:
+                txn.put(k.encode(), v)
+            except:
+                raise Exception("valid k or v",k,type(k),v,type(v))
+
+
+def createDataset(outputPath, imagePathList, labelList, lexiconList=None, checkValid=True):
+    """
+    Create LMDB dataset for CRNN training.
+
+    ARGS:
+        outputPath    : LMDB output path
+        imagePathList : list of image path
+        labelList     : list of corresponding groundtruth texts
+        lexiconList   : (optional) list of lexicon lists
+        checkValid    : if true, check the validity of every image
+    """
+    assert(len(imagePathList) == len(labelList))
+    nSamples = len(imagePathList)
+    env = lmdb.open(outputPath, map_size=1099511627776)
+    cache = {}
+    cnt = 1
+    root_path = "/mnt/data/th/crnn.pytorch/data/mnt/ramdisk/max/90kDICT32px"
+    for i in range(nSamples):
+        imagePath = os.path.join(root_path,imagePathList[i])
+        label = labelList[i].split("_")[1]
+        if not os.path.exists(imagePath):
+            print('%s does not exist' % imagePath)
+            continue
+        with open(imagePath, 'rb') as f:
+            imageBin = f.read()
+        if checkValid:
+            if not checkImageIsValid(imageBin):
+                print('%s is not a valid image' % imagePath)
+                continue
+
+        imageKey = 'image-%09d' % cnt
+        labelKey = 'label-%09d' % cnt
+        cache[imageKey] = imageBin
+        cache[labelKey] = label.encode()
+        if lexiconList:
+            lexiconKey = 'lexicon-%09d' % cnt
+            cache[lexiconKey] = ' '.join(lexiconList[i])
+        if cnt % 1000 == 0:
+            writeCache(env, cache)
+            cache = {}
+            print('Written %d / %d' % (cnt, nSamples))
+        cnt += 1
+    nSamples = cnt-1
+    cache['num-samples'] = str(nSamples).encode()
+    writeCache(env, cache)
+    print('Created dataset with %d samples' % nSamples)
+
+
+if __name__ == '__main__':
+    # imagePathList = []
+    with open("/mnt/data/th/crnn.pytorch/data/mnt/ramdisk/max/90kDICT32px/imlist.txt","r") as f:
+        imagePathList = f.read().splitlines()
+        f.close()
+    with open("/mnt/data/th/crnn.pytorch/data/mnt/ramdisk/max/90kDICT32px/annotation.txt","r") as f:
+        labelList = f.read().splitlines()
+        f.close()
+    # with open("/mnt/data/th/crnn.pytorch/data/mnt/ramdisk/max/90kDICT32px/lexicon.txt","r") as f:
+    #     lexiconList = f.read().splitlines()
+    #     f.close()
+        # content = f.readlines()
+    createDataset("./data",imagePathList ,labelList)

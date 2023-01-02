@@ -10,20 +10,25 @@ import lib.utils.utils as utils
 from lib.dataset import get_dataset
 from lib.core import function
 import lib.config.alphabets as alphabets
-from lib.utils.utils import model_info
+from lib.utils.utils import model_info,SmoothCTCLoss
+import dataset
+# from lib.utils import SmoothCTCLoss
+#from warpctc_pytorch import CTCLoss
 
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
+
+
 
 def parse_arg():
     parser = argparse.ArgumentParser(description="train crnn")
 
-    parser.add_argument('--cfg', help='experiment configuration filename', required=True, type=str)
+    parser.add_argument('--cfg', help='experiment configuration filename', default="lib/config/OWN_config.yaml", type=str)
 
     args = parser.parse_args()
 
     with open(args.cfg, 'r') as f:
-        # config = yaml.load(f, Loader=yaml.FullLoader)
-        config = yaml.load(f)
+        config = yaml.load(f, Loader=yaml.FullLoader)
+        # config = yaml.load(f)
         config = edict(config)
 
     config.DATASET.ALPHABETS = alphabets.alphabet
@@ -44,12 +49,12 @@ def main():
     cudnn.deterministic = config.CUDNN.DETERMINISTIC
     cudnn.enabled = config.CUDNN.ENABLED
 
-    # writer dict
-    writer_dict = {
-        'writer': SummaryWriter(log_dir=output_dict['tb_dir']),
-        'train_global_steps': 0,
-        'valid_global_steps': 0,
-    }
+    # # writer dict
+    # writer_dict = {
+    #     'writer': SummaryWriter(log_dir=output_dict['tb_dir']),
+    #     'train_global_steps': 0,
+    #     'valid_global_steps': 0,
+    # }
 
     # construct face related neural networks
     model = crnn.get_crnn(config)
@@ -63,8 +68,8 @@ def main():
     model = model.to(device)
 
     # define loss function
-    criterion = torch.nn.CTCLoss()
-
+    # criterion = torch.nn.CTCLoss()
+    criterion = SmoothCTCLoss(config.MODEL.NUM_CLASSES + 1)
     last_epoch = config.TRAIN.BEGIN_EPOCH
     optimizer = utils.get_optimizer(config, model)
     if isinstance(config.TRAIN.LR_STEP, list):
@@ -110,36 +115,48 @@ def main():
             model.load_state_dict(checkpoint)
 
     model_info(model)
-    train_dataset = get_dataset(config)(config, is_train=True)
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=config.TRAIN.BATCH_SIZE_PER_GPU,
-        shuffle=config.TRAIN.SHUFFLE,
-        num_workers=config.WORKERS,
-        pin_memory=config.PIN_MEMORY,
-    )
+    train_dataset = dataset.lmdbDataset(root=config.DATASET.trainroot)
+    assert train_dataset
+    sampler = None
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=config.TRAIN.BATCH_SIZE_PER_GPU,
+        shuffle=True, sampler=sampler,
+        num_workers=int(config.WORKERS),
+        collate_fn=dataset.alignCollate(imgH=config.MODEL.IMAGE_SIZE.H, imgW=config.MODEL.IMAGE_SIZE.W, keep_ratio=True))
+    val_dataset = dataset.lmdbDataset(
+        root=config.DATASET.valroot, transform=dataset.resizeNormalize((100, 32)))
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset, shuffle=True, batch_size=config.TEST.BATCH_SIZE_PER_GPU, num_workers=int(config.WORKERS))
+    
+    # train_dataset = get_dataset(config)(config, is_train=True)
+    # train_loader = DataLoader(
+    #     dataset=train_dataset,
+    #     batch_size=,
+    #     shuffle=config.TRAIN.SHUFFLE,
+    #     num_workers=,
+    #     pin_memory=config.PIN_MEMORY,
+    # )
 
-    val_dataset = get_dataset(config)(config, is_train=False)
-    val_loader = DataLoader(
-        dataset=val_dataset,
-        batch_size=config.TEST.BATCH_SIZE_PER_GPU,
-        shuffle=config.TEST.SHUFFLE,
-        num_workers=config.WORKERS,
-        pin_memory=config.PIN_MEMORY,
-    )
+    # val_dataset = get_dataset(config)(config, is_train=False)
+    # val_loader = DataLoader(
+    #     dataset=val_dataset,
+    #     batch_size=config.TEST.BATCH_SIZE_PER_GPU,
+    #     shuffle=config.TEST.SHUFFLE,
+    #     num_workers=config.WORKERS,
+    #     pin_memory=config.PIN_MEMORY,
+    # )
 
     best_acc = 0.5
     converter = utils.strLabelConverter(config.DATASET.ALPHABETS)
     for epoch in range(last_epoch, config.TRAIN.END_EPOCH):
 
-        function.train(config, train_loader, train_dataset, converter, model, criterion, optimizer, device, epoch, writer_dict, output_dict)
+        function.train(config, train_loader, train_dataset, converter, model, criterion, optimizer, device, epoch, None, output_dict)
         lr_scheduler.step()
 
-        acc = function.validate(config, val_loader, val_dataset, converter, model, criterion, device, epoch, writer_dict, output_dict)
+        acc = function.validate(config, val_loader, val_dataset, converter, model, criterion, device, epoch, None, output_dict)
 
         is_best = acc > best_acc
         best_acc = max(acc, best_acc)
-
         print("is best:", is_best)
         print("best acc is:", best_acc)
         # save checkpoint
@@ -153,7 +170,7 @@ def main():
             },  os.path.join(output_dict['chs_dir'], "checkpoint_{}_acc_{:.4f}.pth".format(epoch, acc))
         )
 
-    writer_dict['writer'].close()
+    # writer_dict['writer'].close()
 
 if __name__ == '__main__':
 

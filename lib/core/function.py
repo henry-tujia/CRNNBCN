@@ -3,6 +3,34 @@ import time
 import lib.utils.utils as utils
 import torch
 
+def cer(r: list, h: list):
+     """
+     Calculation of CER with Levenshtein distance.
+     """
+     # initialisation
+     import numpy
+     d = numpy.zeros((len(r) + 1) * (len(h) + 1), dtype=numpy.uint16)
+     d = d.reshape((len(r) + 1, len(h) + 1))
+     for i in range(len(r) + 1):
+         for j in range(len(h) + 1):
+             if i == 0:
+                 d[0][j] = j
+             elif j == 0:
+                 d[i][0] = i
+
+     # computation
+     for i in range(1, len(r) + 1):
+         for j in range(1, len(h) + 1):
+             if r[i - 1] == h[j - 1]:
+                 d[i][j] = d[i - 1][j - 1]
+             else:
+                 substitution = d[i - 1][j - 1] + 1
+                 insertion = d[i][j - 1] + 1
+                 deletion = d[i - 1][j] + 1
+                 d[i][j] = min(substitution, insertion, deletion)
+     return d[len(r)][len(h)] , float(len(r))
+
+
 class AverageMeter(object):
     """Computes and stores the average and current value"""
     def __init__(self):
@@ -33,11 +61,11 @@ def train(config, train_loader, dataset, converter, model, criterion, optimizer,
     model.train()
 
     end = time.time()
-    for i, (inp, idx) in enumerate(train_loader):
+    for i, (inp, text) in enumerate(train_loader):
         # measure data time
         data_time.update(time.time() - end)
 
-        labels = utils.get_batch_label(dataset, idx)
+        # labels = utils.get_batch_label(dataset, idx)
         inp = inp.to(device)
 
         # inference
@@ -45,7 +73,7 @@ def train(config, train_loader, dataset, converter, model, criterion, optimizer,
 
         # compute loss
         batch_size = inp.size(0)
-        text, length = converter.encode(labels)                    # length = 一个batch中的总字符长度, text = 一个batch中的字符所对应的下标
+        text, length,_ = converter.encode(text)                    # length = 一个batch中的总字符长度, text = 一个batch中的字符所对应的下标
         preds_size = torch.IntTensor([preds.size(0)] * batch_size) # timestep * batchsize
         loss = criterion(preds, text, preds_size, length)
 
@@ -56,6 +84,13 @@ def train(config, train_loader, dataset, converter, model, criterion, optimizer,
         losses.update(loss.item(), inp.size(0))
 
         batch_time.update(time.time()-end)
+
+        # _, preds = preds.max(2)
+        # preds = preds.transpose(1, 0).contiguous().view(-1)
+        # sim_preds = converter.decode(preds.data, preds_size.data, raw=False)
+
+        # validate(config, train_loader, dataset, converter,model,criterion,device,epoch,None,None)
+
         if i % config.PRINT_FREQ == 0:
             msg = 'Epoch: [{0}][{1}/{2}]\t' \
                   'Time {batch_time.val:.3f}s ({batch_time.avg:.3f}s)\t' \
@@ -82,10 +117,11 @@ def validate(config, val_loader, dataset, converter, model, criterion, device, e
     model.eval()
 
     n_correct = 0
+    sum_all = 0
     with torch.no_grad():
-        for i, (inp, idx) in enumerate(val_loader):
+        for i, (inp, text) in enumerate(val_loader):
 
-            labels = utils.get_batch_label(dataset, idx)
+            # labels = utils.get_batch_label(dataset, idx)
             inp = inp.to(device)
 
             # inference
@@ -93,7 +129,7 @@ def validate(config, val_loader, dataset, converter, model, criterion, device, e
 
             # compute loss
             batch_size = inp.size(0)
-            text, length = converter.encode(labels)
+            text, length,raw_text = converter.encode(text)
             preds_size = torch.IntTensor([preds.size(0)] * batch_size)
             loss = criterion(preds, text, preds_size, length)
 
@@ -102,26 +138,25 @@ def validate(config, val_loader, dataset, converter, model, criterion, device, e
             _, preds = preds.max(2)
             preds = preds.transpose(1, 0).contiguous().view(-1)
             sim_preds = converter.decode(preds.data, preds_size.data, raw=False)
-            for pred, target in zip(sim_preds, labels):
-                if pred == target:
-                    n_correct += 1
+            sim_preds_encoded,_,_ = converter.encode(sim_preds)
 
-            if (i + 1) % config.PRINT_FREQ == 0:
-                print('Epoch: [{0}][{1}/{2}]'.format(epoch, i, len(val_loader)))
+            temp_correct, temp_sum = cer(text.tolist(),sim_preds_encoded.tolist())
+            n_correct += (temp_sum-temp_correct)
+            sum_all += temp_sum
 
             if i == config.TEST.NUM_TEST_BATCH:
                 break
 
     raw_preds = converter.decode(preds.data, preds_size.data, raw=True)[:config.TEST.NUM_TEST_DISP]
-    for raw_pred, pred, gt in zip(raw_preds, sim_preds, labels):
+    for raw_pred, pred, gt in zip(raw_preds, sim_preds, raw_text):
         print('%-20s => %-20s, gt: %-20s' % (raw_pred, pred, gt))
 
-    num_test_sample = config.TEST.NUM_TEST_BATCH * config.TEST.BATCH_SIZE_PER_GPU
-    if num_test_sample > len(dataset):
-        num_test_sample = len(dataset)
+    # num_test_sample = config.TEST.NUM_TEST_BATCH * config.TEST.BATCH_SIZE_PER_GPU
+    # if num_test_sample > len(dataset):
+    #     num_test_sample = len(dataset)
 
-    print("[#correct:{} / #total:{}]".format(n_correct, num_test_sample))
-    accuracy = n_correct / float(num_test_sample)
+    print("[#correct:{} / #total:{}]".format(n_correct, sum_all))
+    accuracy = n_correct / float(sum_all)
     print('Test loss: {:.4f}, accuray: {:.4f}'.format(losses.avg, accuracy))
 
     if writer_dict:
