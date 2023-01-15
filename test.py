@@ -71,7 +71,7 @@ def main():
     # criterion = CTCLoss()
     last_epoch = config.TRAIN.BEGIN_EPOCH
 
-    model_state_file = "/home/wuxingxing/CRNN_Chinese_Characters_Rec/output/OWN/crnn/2023-01-01-21-55/checkpoints/checkpoint_17_acc_0.0000.pth"
+    model_state_file = "/home/wuxingxing/CRNN_Chinese_Characters_Rec/output/OWN/crnn/2023-01-15-11-41/checkpoints/checkpoint_0_acc_0.7559.pth"
     if model_state_file == '':
         print(" => no checkpoint found")
     checkpoint = torch.load(model_state_file, map_location='cpu')

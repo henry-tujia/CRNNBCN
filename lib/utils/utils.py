@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 import torch
 from torch import nn
-
+import horovod.torch as hvd
 
 class SmoothCTCLoss(nn.Module):
 
@@ -292,3 +292,36 @@ if __name__ == '__main__':
     #     f.close()
         # content = f.readlines()
     createDataset("./data",imagePathList ,labelList)
+
+
+class Metric(object):
+    def __init__(self, name):
+        self.name = name
+        self.sum = torch.tensor(0.)
+        self.n = torch.tensor(0.)
+
+    def update(self, val):
+        self.sum += hvd.allreduce(val.detach().cpu(), name=self.name)
+        self.n += 1
+
+    @property
+    def avg(self):
+        return self.sum / self.n
+
+
+def ce_loss(pt_logits, gt_labels, gt_lengths, ce):
+
+        # iter_size = pt_logits.shape[0] // gt_labels.shape[0]
+        # if iter_size > 1:
+        #     gt_labels = gt_labels.repeat(3, 1, 1)
+        #     gt_lengths = gt_lengths.repeat(3)
+        # flat_gt_labels = _flatten(gt_labels, gt_lengths)
+        temp = gt_lengths.sum()
+        flat_pt_logits = _flatten(pt_logits.permute(1,0,2), gt_lengths)
+
+        loss =ce(flat_pt_logits, gt_labels.long())
+
+        return loss
+
+def _flatten(sources, lengths):
+        return torch.cat([t[:l] for t, l in zip(sources, lengths)])

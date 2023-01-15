@@ -1,4 +1,4 @@
-GPUID: 0
+GPUID: 1
 WORKERS: 1
 PRINT_FREQ: 10
 SAVE_FREQ: 10
@@ -12,8 +12,10 @@ CUDNN:
 
 DATASET:
   DATASET: OWN
-  ROOT: "H:/DL-DATASET/360M/images"
-  JSON_FILE: {'train': 'lib/dataset/txt/train_own.txt', 'val': 'lib/dataset/txt/test_own.txt'}
+  valroot: "/home/wuxingxing/crnn.pytorch/data/evaluation/IIIT5k_3000"
+  trainroot: "/home/wuxingxing/crnn.pytorch/data"
+  # ROOT: ""
+  # JSON_FILE: {'train': './', 'val': ''}
   SCALE_FACTOR: 0.25
   ROT_FACTOR: 30
   STD: 0.193
@@ -21,15 +23,15 @@ DATASET:
   ALPHABETS: ''
 
 TRAIN:
-  BATCH_SIZE_PER_GPU: 32
+  BATCH_SIZE_PER_GPU: 100
   SHUFFLE: True
   BEGIN_EPOCH: 0
-  END_EPOCH: 100
+  END_EPOCH: 5
   RESUME:
     IS_RESUME: False
     FILE: ''
   OPTIMIZER: 'adam'
-  LR: 0.0001
+  LR: 0.001
   WD: 0.0
   LR_STEP: [60, 80]
   LR_FACTOR: 0.1
@@ -38,7 +40,7 @@ TRAIN:
   RMSPROP_ALPHA:
   RMSPROP_CENTERED:
   FINETUNE:
-    IS_FINETUNE: true
+    IS_FINETUNE: false
     FINETUNE_CHECKPOINIT: 'output/checkpoints/mixed_second_finetune_acc_97P7.pth'
     FREEZE: true
 

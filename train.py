@@ -1,17 +1,20 @@
 import argparse
-from easydict import EasyDict as edict
-import yaml
 import os
+
+import horovod.torch as hvd
 import torch
 import torch.backends.cudnn as cudnn
-from torch.utils.data import DataLoader
+import torch.nn
+import yaml
+from easydict import EasyDict as edict
+
+import dataset
+import lib.config.alphabets as alphabets
 import lib.models.crnn as crnn
 import lib.utils.utils as utils
-from lib.dataset import get_dataset
 from lib.core import function
-import lib.config.alphabets as alphabets
-from lib.utils.utils import model_info,SmoothCTCLoss
-import dataset
+from lib.utils.utils import Metric, SmoothCTCLoss, model_info
+
 # from lib.utils import SmoothCTCLoss
 #from warpctc_pytorch import CTCLoss
 
@@ -23,7 +26,7 @@ def parse_arg():
     parser = argparse.ArgumentParser(description="train crnn")
 
     parser.add_argument('--cfg', help='experiment configuration filename', default="lib/config/OWN_config.yaml", type=str)
-
+    parser.add_argument("--local_rank", default=-1)
     args = parser.parse_args()
 
     with open(args.cfg, 'r') as f:
@@ -33,6 +36,7 @@ def parse_arg():
 
     config.DATASET.ALPHABETS = alphabets.alphabet
     config.MODEL.NUM_CLASSES = len(config.DATASET.ALPHABETS)
+    config.local_rank = int(args.local_rank)
 
     return config
 
@@ -40,14 +44,19 @@ def main():
 
     # load config
     config = parse_arg()
+    hvd.init()
 
+    if hvd.rank() == 0:
     # create output folder
-    output_dict = utils.create_log_folder(config, phase='train')
+        output_dict = utils.create_log_folder(config, phase='train')
+    else:
+        output_dict = None
 
     # cudnn
     cudnn.benchmark = config.CUDNN.BENCHMARK
     cudnn.deterministic = config.CUDNN.DETERMINISTIC
     cudnn.enabled = config.CUDNN.ENABLED
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2'
 
     # # writer dict
     # writer_dict = {
@@ -59,19 +68,35 @@ def main():
     # construct face related neural networks
     model = crnn.get_crnn(config)
 
+    torch.cuda.set_device(hvd.local_rank())
+
     # get device
     if torch.cuda.is_available():
-        device = torch.device("cuda:{}".format(config.GPUID))
+        device = torch.device("cuda")
     else:
-        device = torch.device("cpu:0")
+        device = torch.device("cpu")
 
+    torch.set_num_threads(4)
     model = model.to(device)
 
     # define loss function
-    # criterion = torch.nn.CTCLoss()
-    criterion = SmoothCTCLoss(config.MODEL.NUM_CLASSES + 1)
+    criterion = torch.nn.CTCLoss().to(device)
+    criterion_l = torch.nn.CrossEntropyLoss().to(device)
+    # criterion = SmoothCTCLoss(config.MODEL.NUM_CLASSES + 1)
     last_epoch = config.TRAIN.BEGIN_EPOCH
+
     optimizer = utils.get_optimizer(config, model)
+
+    optimizer = hvd.DistributedOptimizer(
+        optimizer, named_parameters=model.named_parameters(),
+        compression=hvd.Compression.none,
+        backward_passes_per_step=1,
+        op=hvd.Average,
+        gradient_predivide_factor=1)
+
+
+
+    # optimizer = utils.get_optimizer(config, model)
     if isinstance(config.TRAIN.LR_STEP, list):
         lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
             optimizer, config.TRAIN.LR_STEP,
@@ -117,58 +142,50 @@ def main():
     model_info(model)
     train_dataset = dataset.lmdbDataset(root=config.DATASET.trainroot)
     assert train_dataset
-    sampler = None
+
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset, num_replicas=hvd.size(), rank=hvd.rank())
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=config.TRAIN.BATCH_SIZE_PER_GPU,
-        shuffle=True, sampler=sampler,
+        shuffle=False, sampler=train_sampler,
         num_workers=int(config.WORKERS),
         collate_fn=dataset.alignCollate(imgH=config.MODEL.IMAGE_SIZE.H, imgW=config.MODEL.IMAGE_SIZE.W, keep_ratio=True))
+    
+
     val_dataset = dataset.lmdbDataset(
         root=config.DATASET.valroot, transform=dataset.resizeNormalize((100, 32)))
+    # val_sampler = torch.utils.data.distributed.DistributedSampler(
+    #     val_dataset, num_replicas=hvd.size(), rank=hvd.rank())
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, shuffle=True, batch_size=config.TEST.BATCH_SIZE_PER_GPU, num_workers=int(config.WORKERS))
+        val_dataset, shuffle=False,sampler=None,batch_size=config.TEST.BATCH_SIZE_PER_GPU, num_workers=int(config.WORKERS))
     
-    # train_dataset = get_dataset(config)(config, is_train=True)
-    # train_loader = DataLoader(
-    #     dataset=train_dataset,
-    #     batch_size=,
-    #     shuffle=config.TRAIN.SHUFFLE,
-    #     num_workers=,
-    #     pin_memory=config.PIN_MEMORY,
-    # )
-
-    # val_dataset = get_dataset(config)(config, is_train=False)
-    # val_loader = DataLoader(
-    #     dataset=val_dataset,
-    #     batch_size=config.TEST.BATCH_SIZE_PER_GPU,
-    #     shuffle=config.TEST.SHUFFLE,
-    #     num_workers=config.WORKERS,
-    #     pin_memory=config.PIN_MEMORY,
-    # )
-
+        # Horovod: broadcast parameters & optimizer state.
+    hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+    hvd.broadcast_optimizer_state(optimizer, root_rank=0)
     best_acc = 0.5
     converter = utils.strLabelConverter(config.DATASET.ALPHABETS)
+
     for epoch in range(last_epoch, config.TRAIN.END_EPOCH):
 
-        function.train(config, train_loader, train_dataset, converter, model, criterion, optimizer, device, epoch, None, output_dict)
+        function.train(config, train_loader, train_dataset, converter, model, criterion, optimizer, device, epoch, None, output_dict,train_sampler,criterion_l)
         lr_scheduler.step()
 
-        acc = function.validate(config, val_loader, val_dataset, converter, model, criterion, device, epoch, None, output_dict)
-
-        is_best = acc > best_acc
-        best_acc = max(acc, best_acc)
-        print("is best:", is_best)
-        print("best acc is:", best_acc)
-        # save checkpoint
-        torch.save(
-            {
-                "state_dict": model.state_dict(),
-                "epoch": epoch + 1,
-                # "optimizer": optimizer.state_dict(),
-                # "lr_scheduler": lr_scheduler.state_dict(),
-                "best_acc": best_acc,
-            },  os.path.join(output_dict['chs_dir'], "checkpoint_{}_acc_{:.4f}.pth".format(epoch, acc))
-        )
+        if hvd.rank() == 0:
+            acc = function.validate(config, val_loader, val_dataset, converter, model, criterion, device, epoch, None, output_dict)
+            is_best = acc > best_acc
+            best_acc = max(acc, best_acc)
+            print("is best:", is_best)
+            print("best acc is:", best_acc)
+            # save checkpoint
+            torch.save(
+                {
+                    "state_dict": model.state_dict(),
+                    "epoch": epoch + 1,
+                    # "optimizer": optimizer.state_dict(),
+                    # "lr_scheduler": lr_scheduler.state_dict(),
+                    "best_acc": best_acc,
+                },  os.path.join(output_dict['chs_dir'], "checkpoint_{}_acc_{:.4f}.pth".format(epoch, acc))
+            )
 
     # writer_dict['writer'].close()
 

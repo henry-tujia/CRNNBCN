@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
+from lib.modules.model_language import BCNLanguage
 
 class BidirectionalLSTM(nn.Module):
     # Inputs hidden units Out
@@ -76,6 +77,12 @@ class CRNN(nn.Module):
 
         return output
 
+class CRNNWithBCN(nn.Module):
+    def __init__(self,config) -> None:
+        super().__init__()
+        self.crnn = CRNN(config.MODEL.IMAGE_SIZE.H, 1, config.MODEL.NUM_CLASSES + 1, config.MODEL.NUM_HIDDEN)
+        self.bcn = BCNLanguage(config.MODEL.NUM_CLASSES + 1,23*config.TRAIN.BATCH_SIZE_PER_GPU)
+
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
@@ -86,7 +93,9 @@ def weights_init(m):
 
 def get_crnn(config):
 
-    model = CRNN(config.MODEL.IMAGE_SIZE.H, 1, config.MODEL.NUM_CLASSES + 1, config.MODEL.NUM_HIDDEN)
+    model = CRNNWithBCN(config)
+
+    # model = CRNN(config.MODEL.IMAGE_SIZE.H, 1, config.MODEL.NUM_CLASSES + 1, config.MODEL.NUM_HIDDEN)
     model.apply(weights_init)
 
     return model
